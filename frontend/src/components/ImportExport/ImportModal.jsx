@@ -7,7 +7,7 @@ import StatCard from './StatCard.jsx'
 import ConflictModal from './ConflictModal.jsx'
 import { parseJsonFileAsync, formatBytes, yieldToMain } from './utils.js'
 
-const BATCH_SIZE = 50
+const BATCH_SIZE = 30
 
 export default function ImportModal({ onClose, onComplete }) {
   const fileInputRef = useRef(null)
@@ -18,24 +18,24 @@ export default function ImportModal({ onClose, onComplete }) {
   const [previewData, setPreviewData] = useState(null)
   const [parsedData, setParsedData] = useState(null)
   const [importState, setImportState] = useState({
-    imported: [],
-    skipped: [],
-    failed: [],
-    logs: [],
-    errors: [],
-    processed: 0,
-    total: 0
+    imported: 0, skipped: 0, failed: 0,
+    logs: [], errors: [], processed: 0, total: 0
   })
   const [showConflicts, setShowConflicts] = useState(false)
   const [defaultStrategy, setDefaultStrategy] = useState('skip')
   const [error, setError] = useState('')
   const abortRef = useRef(false)
+  const importStateRef = useRef(importState)
+
+  useEffect(() => {
+    importStateRef.current = importState
+  }, [importState])
 
   useEffect(() => {
     return () => { abortRef.current = true }
   }, [])
 
-  const fetch = (url, options) => {
+  const apiFetch = useCallback((url, options) => {
     return window.fetch(`/api${url}`, {
       headers: { 'Content-Type': 'application/json' },
       ...options,
@@ -47,7 +47,7 @@ export default function ImportModal({ onClose, onComplete }) {
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
       return data
     })
-  }
+  }, [])
 
   const handleFileSelect = async (e) => {
     const file = e.target.files?.[0]
@@ -66,7 +66,9 @@ export default function ImportModal({ onClose, onComplete }) {
       await yieldToMain()
       setParsedData(json)
 
-      const preview = await fetch('/services/import/preview', {
+      setStep('validating')
+
+      const preview = await apiFetch('/services/import/preview', {
         method: 'POST',
         body: json
       })
@@ -87,30 +89,25 @@ export default function ImportModal({ onClose, onComplete }) {
     const startTime = Date.now()
 
     setImportState({
-      imported: [],
-      skipped: [],
-      failed: [],
-      logs: [`[信息] 开始导入 ${previewData?.validCount || total} 条有效配置，共 ${total} 条...`],
+      imported: 0, skipped: 0, failed: 0,
+      logs: [`[信息] 开始导入 ${previewData?.validCount || total} 条有效配置...`],
       errors: previewData?.errors || [],
-      processed: 0,
-      total
+      processed: 0, total
     })
     setStep('importing')
 
     let existingNames = []
     try {
-      existingNames = await fetch('/services/groups').catch(() => [])
-      const allSvcs = await fetch('/services').catch(() => [])
-      existingNames = Array.isArray(allSvcs) ? allSvcs.map(s => s.name) : []
+      existingNames = await apiFetch('/services/names/list')
+      if (!Array.isArray(existingNames)) existingNames = []
     } catch {
       existingNames = []
     }
 
-    let cumulativeImported = []
-    let cumulativeSkipped = []
-    let cumulativeFailed = []
-    let cumulativeLogs = [`[信息] 开始导入 ${previewData?.validCount || total} 条有效配置，共 ${total} 条...`]
-    let workingNames = [...existingNames]
+    let totalImported = 0
+    let totalSkipped = 0
+    let totalFailed = 0
+    let allLogs = [`[信息] 开始导入 ${previewData?.validCount || total} 条有效配置...`]
 
     for (let i = 0; i < total; i += BATCH_SIZE) {
       if (abortRef.current) break
@@ -125,28 +122,32 @@ export default function ImportModal({ onClose, onComplete }) {
       })
 
       try {
-        const result = await fetch('/services/import/batch', {
+        const result = await apiFetch('/services/import/batch', {
           method: 'POST',
           body: {
             services: batch,
             conflictStrategy: defaultStrategy,
             conflictResolutions: batchResolutions,
-            existingNames: workingNames
+            existingNames
           }
         })
 
-        cumulativeImported = cumulativeImported.concat(result.imported || [])
-        cumulativeSkipped = cumulativeSkipped.concat(result.skipped || [])
-        cumulativeFailed = cumulativeFailed.concat(result.failed || [])
-        cumulativeLogs = cumulativeLogs.concat(result.logs || [])
-        if (result.newNames) workingNames = workingNames.concat(result.newNames)
+        const batchImported = result.imported?.length || 0
+        const batchSkipped = result.skipped?.length || 0
+        const batchFailed = result.failed?.length || 0
+
+        totalImported += batchImported
+        totalSkipped += batchSkipped
+        totalFailed += batchFailed
+        allLogs = allLogs.concat(result.logs || [])
+        if (result.newNames) existingNames = existingNames.concat(result.newNames)
 
         const processed = Math.min(i + BATCH_SIZE, total)
         setImportState({
-          imported: cumulativeImported,
-          skipped: cumulativeSkipped,
-          failed: cumulativeFailed,
-          logs: cumulativeLogs,
+          imported: totalImported,
+          skipped: totalSkipped,
+          failed: totalFailed,
+          logs: allLogs,
           errors: previewData?.errors || [],
           processed,
           total
@@ -156,36 +157,30 @@ export default function ImportModal({ onClose, onComplete }) {
           await yieldToMain()
         }
       } catch (e) {
-        cumulativeFailed = cumulativeFailed.concat(
-          batch.map((_, j) => ({
-            index: i + j,
-            name: batch[j]?.name || `第 ${i + j + 1} 项`,
-            error: e.message
-          }))
-        )
-        cumulativeLogs.push(`[失败] 批次 ${Math.floor(i / BATCH_SIZE) + 1} 处理出错: ${e.message}`)
+        totalFailed += batch.length
+        allLogs.push(`[失败] 批次 ${Math.floor(i / BATCH_SIZE) + 1} 出错: ${e.message}`)
         setImportState(prev => ({
           ...prev,
-          failed: cumulativeFailed,
-          logs: cumulativeLogs
+          failed: totalFailed,
+          logs: allLogs
         }))
-        break
       }
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1)
-    cumulativeLogs.push(`[信息] 导入完成: 成功 ${cumulativeImported.length} 条, 跳过 ${cumulativeSkipped.length} 条, 失败 ${cumulativeFailed.length} 条, 耗时 ${duration}s`)
+    allLogs.push(`[信息] 导入完成: 成功 ${totalImported}, 跳过 ${totalSkipped}, 失败 ${totalFailed}, 耗时 ${duration}s`)
 
-    setImportState(prev => ({
-      ...prev,
-      imported: cumulativeImported,
-      skipped: cumulativeSkipped,
-      failed: cumulativeFailed,
-      logs: cumulativeLogs,
-      processed: total
-    }))
+    setImportState({
+      imported: totalImported,
+      skipped: totalSkipped,
+      failed: totalFailed,
+      logs: allLogs,
+      errors: previewData?.errors || [],
+      processed: total,
+      total
+    })
     setStep('done')
-  }, [parsedData, previewData, defaultStrategy])
+  }, [parsedData, previewData, defaultStrategy, apiFetch])
 
   const handlePreviewImport = () => {
     if (previewData?.conflicts?.length > 0 && !showConflicts) {
@@ -199,9 +194,6 @@ export default function ImportModal({ onClose, onComplete }) {
     setShowConflicts(false)
     runBatchImport(resolutions)
   }
-
-  const totalProcessed = importState.processed
-  const importTotal = importState.total || previewData?.validCount || 1
 
   return (
     <>
@@ -229,35 +221,17 @@ export default function ImportModal({ onClose, onComplete }) {
               }}
             >
               <div style={{ fontSize: 48, marginBottom: 12 }}>📁</div>
-              <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>
-                点击选择 JSON 文件
-              </div>
-              <div style={{ fontSize: 12, color: '#6b7280' }}>
-                支持 services 数组格式，可先下载模板查看格式
-              </div>
+              <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>点击选择 JSON 文件</div>
+              <div style={{ fontSize: 12, color: '#6b7280' }}>支持 services 数组格式，可先下载模板</div>
             </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json,application/json"
-              style={{ display: 'none' }}
-              onChange={handleFileSelect}
-            />
+            <input ref={fileInputRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={handleFileSelect} />
 
             {error && (
-              <div style={{
-                marginTop: 16, padding: 12, borderRadius: 8,
-                background: '#fee2e2', color: '#991b1b', fontSize: 13
-              }}>{error}</div>
+              <div style={{ marginTop: 16, padding: 12, borderRadius: 8, background: '#fee2e2', color: '#991b1b', fontSize: 13 }}>{error}</div>
             )}
 
-            <div style={{
-              display: 'flex', gap: 10, justifyContent: 'flex-end',
-              marginTop: 20
-            }}>
-              <Button onClick={() => window.open('/api/services/template', '_blank')}>
-                下载模板
-              </Button>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 20 }}>
+              <Button onClick={() => window.open('/api/services/template', '_blank')}>下载模板</Button>
               <Button onClick={onClose}>取消</Button>
             </div>
           </div>
@@ -267,10 +241,8 @@ export default function ImportModal({ onClose, onComplete }) {
           <div style={{ padding: 40 }}>
             <div style={{ textAlign: 'center', marginBottom: 20 }}>
               <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>正在解析文件</div>
-              <div style={{ fontSize: 12, color: '#6b7280' }}>
-                {fileName} ({formatBytes(fileSize)})
-              </div>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>正在读取文件</div>
+              <div style={{ fontSize: 12, color: '#6b7280' }}>{fileName} ({formatBytes(fileSize)})</div>
             </div>
             <ProgressBar
               value={parseProgress.loaded}
@@ -278,9 +250,14 @@ export default function ImportModal({ onClose, onComplete }) {
               label={parseProgress.total ? `读取: ${formatBytes(parseProgress.loaded)}/${formatBytes(parseProgress.total)}` : '读取中...'}
               indeterminate={!parseProgress.total}
             />
-            <div style={{ fontSize: 11, color: '#9ca3af', textAlign: 'center', marginTop: 12 }}>
-              💡 大文件解析和验证可能需要几秒，请耐心等待
-            </div>
+          </div>
+        )}
+
+        {step === 'validating' && (
+          <div style={{ padding: 40, textAlign: 'center' }}>
+            <ProgressBar indeterminate />
+            <div style={{ fontWeight: 600, marginTop: 16 }}>正在验证配置...</div>
+            <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>检查必填字段、枚举值、数值边界和名称冲突</div>
           </div>
         )}
 
@@ -313,12 +290,9 @@ export default function ImportModal({ onClose, onComplete }) {
             {previewData.errors?.length > 0 && (
               <div style={{ marginTop: 16 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: '#991b1b', marginBottom: 8 }}>
-                  ⚠️ 发现 {previewData.errors.length} 个验证错误（这些配置将被跳过）:
+                  ⚠️ 发现 {previewData.errors.length} 个验证错误（将被跳过）:
                 </div>
-                <div style={{
-                  maxHeight: 100, overflowY: 'auto',
-                  background: '#fef2f2', borderRadius: 8, padding: 10
-                }}>
+                <div style={{ maxHeight: 100, overflowY: 'auto', background: '#fef2f2', borderRadius: 8, padding: 10 }}>
                   {previewData.errors.slice(0, 30).map((e, i) => (
                     <div key={i} style={{ fontSize: 12, color: '#991b1b', padding: '2px 0' }}>
                       • <b>{e.field}</b>: {e.message}
@@ -334,34 +308,8 @@ export default function ImportModal({ onClose, onComplete }) {
             )}
 
             {previewData.conflictsTruncated && (
-              <div style={{
-                marginTop: 12, padding: 10, borderRadius: 8,
-                background: '#fffbeb', color: '#92400e', fontSize: 12
-              }}>
-                ⚠️ 冲突过多，仅显示前 500 条。其余冲突将使用默认策略处理。
-              </div>
-            )}
-
-            {previewData.preview?.length > 0 && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
-                  配置预览（前 {Math.min(10, previewData.validCount)} 项）:
-                </div>
-                <div style={{ maxHeight: 140, overflowY: 'auto' }}>
-                  {previewData.preview.map((s, i) => (
-                    <div key={i} style={{
-                      padding: '6px 12px', borderBottom: '1px solid #f3f4f6',
-                      fontSize: 12, fontFamily: 'monospace'
-                    }}>
-                      <b style={{ color: '#4f46e5' }}>{s.name}</b>
-                      <span style={{ color: '#6b7280' }}> · </span>
-                      <span style={{ textTransform: 'uppercase' }}>{s.type}</span>
-                      <span style={{ color: '#6b7280' }}> → </span>
-                      {s.target}{s.port ? `:${s.port}` : ''}
-                      {s.group && <span style={{ color: '#8b5cf6' }}> · [{s.group}]</span>}
-                    </div>
-                  ))}
-                </div>
+              <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: '#fffbeb', color: '#92400e', fontSize: 12 }}>
+                ⚠️ 冲突过多，仅显示前 500 条。其余将使用默认策略处理。
               </div>
             )}
 
@@ -382,17 +330,12 @@ export default function ImportModal({ onClose, onComplete }) {
         {step === 'importing' && (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontSize: 14, fontWeight: 600 }}>
-                正在导入服务配置...
-              </div>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>正在导入服务配置...</div>
               <div style={{ fontSize: 12, color: '#6b7280' }}>
-                {importState.imported.length} 成功 · {importState.skipped.length} 跳过 · {importState.failed.length} 失败
+                {importState.imported} 成功 · {importState.skipped} 跳过 · {importState.failed} 失败
               </div>
             </div>
-            <ProgressBar
-              value={totalProcessed}
-              max={importTotal}
-            />
+            <ProgressBar value={importState.processed} max={importState.total} />
             <div style={{ marginTop: 12 }}>
               <LogViewer logs={importState.logs} errors={importState.errors} />
             </div>
@@ -402,39 +345,31 @@ export default function ImportModal({ onClose, onComplete }) {
         {step === 'done' && (
           <div>
             <div style={{
-              textAlign: 'center', padding: 16, marginBottom: 16,
-              borderRadius: 12,
-              background: importState.imported.length > 0
-                ? (importState.failed.length > 0 ? '#fef3c7' : '#d1fae5')
+              textAlign: 'center', padding: 16, marginBottom: 16, borderRadius: 12,
+              background: importState.imported > 0
+                ? (importState.failed > 0 ? '#fef3c7' : '#d1fae5')
                 : '#fee2e2'
             }}>
               <div style={{ fontSize: 36, marginBottom: 8 }}>
-                {importState.imported.length > 0
-                  ? (importState.failed.length > 0 ? '⚠️' : '✅')
-                  : '❌'}
+                {importState.imported > 0 ? (importState.failed > 0 ? '⚠️' : '✅') : '❌'}
               </div>
               <div style={{ fontSize: 16, fontWeight: 700 }}>
-                {importState.imported.length > 0
-                  ? (importState.failed.length > 0 ? '导入完成（部分失败）' : '导入成功')
+                {importState.imported > 0
+                  ? (importState.failed > 0 ? '导入完成（部分失败）' : '导入成功')
                   : '导入失败'}
               </div>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 16 }}>
-              <StatCard label="成功导入" value={importState.imported.length} color="#10b981" />
-              <StatCard label="跳过" value={importState.skipped.length} color="#f59e0b" />
-              <StatCard label="失败" value={importState.failed.length} color={importState.failed.length > 0 ? '#ef4444' : '#9ca3af'} />
+              <StatCard label="成功导入" value={importState.imported} color="#10b981" />
+              <StatCard label="跳过" value={importState.skipped} color="#f59e0b" />
+              <StatCard label="失败" value={importState.failed} color={importState.failed > 0 ? '#ef4444' : '#9ca3af'} />
             </div>
 
             <LogViewer logs={importState.logs} errors={importState.errors} />
 
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 20 }}>
-              <Button
-                variant="primary"
-                onClick={() => { onComplete?.(); onClose() }}
-              >
-                完成
-              </Button>
+              <Button variant="primary" onClick={() => { onComplete?.(); onClose() }}>完成</Button>
             </div>
           </div>
         )}

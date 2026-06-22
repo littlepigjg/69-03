@@ -26,6 +26,16 @@ router.get('/services', async (req, res) => {
   }
 });
 
+router.get('/services/names/list', async (req, res) => {
+  try {
+    const names = await storage.services.getAllNames();
+    res.json(names);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/services/:id', async (req, res) => {
   try {
     const svc = await storage.services.getById(req.params.id);
