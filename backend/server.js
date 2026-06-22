@@ -7,15 +7,17 @@ const storage = require('./storage');
 const scheduler = require('./scheduler');
 const notifier = require('./notifier');
 const routes = require('./routes');
+const importExportRoutes = require('./importExport');
 
 const app = express();
 const server = http.createServer(app);
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.use('/api', routes);
+app.use('/api', importExportRoutes);
 
 const frontendDir = path.join(__dirname, '..', 'frontend', 'dist');
 try {

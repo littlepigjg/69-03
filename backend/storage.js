@@ -57,11 +57,21 @@ async function initDB() {
       interval_seconds INTEGER DEFAULT 30,
       timeout_ms INTEGER DEFAULT 5000,
       enabled INTEGER DEFAULT 1,
+      group TEXT DEFAULT '',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
   dirty = true;
+
+  try {
+    const cols = db.exec("PRAGMA table_info(services)");
+    const hasGroup = cols[0]?.values?.some(row => row[1] === 'group');
+    if (!hasGroup) {
+      db.run("ALTER TABLE services ADD COLUMN group TEXT DEFAULT ''");
+      dirty = true;
+    }
+  } catch (e) {}
 
   db.run(`
     CREATE TABLE IF NOT EXISTS check_results (
@@ -150,6 +160,21 @@ function queryOne(sql, params = []) {
 const services = {
   getAll: async () => query('SELECT * FROM services ORDER BY name'),
   getById: async (id) => queryOne('SELECT * FROM services WHERE id = ?', [id]),
+  getByName: async (name) => queryOne('SELECT * FROM services WHERE name = ? COLLATE NOCASE', [name]),
+  getAllNames: async () => {
+    const rows = query('SELECT name FROM services');
+    return rows.map(r => r.name);
+  },
+  getByGroup: async (group) => {
+    if (group === null || group === undefined) {
+      return query('SELECT * FROM services ORDER BY name');
+    }
+    return query('SELECT * FROM services WHERE "group" = ? ORDER BY name', [group]);
+  },
+  getGroups: async () => {
+    const rows = query('SELECT DISTINCT "group" FROM services WHERE "group" IS NOT NULL AND "group" != \'\' ORDER BY "group"');
+    return rows.map(r => r.group);
+  },
   create: async (data) => {
     const payload = {
       method: 'GET',
@@ -158,20 +183,33 @@ const services = {
       timeout_ms: config.defaultTimeoutMs,
       enabled: 1,
       port: null,
+      group: '',
       ...data
     };
     const res = run(
-      `INSERT INTO services (name, type, target, port, method, expectedStatus, interval_seconds, timeout_ms, enabled)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [payload.name, payload.type, payload.target, payload.port, payload.method, payload.expectedStatus, payload.interval_seconds, payload.timeout_ms, payload.enabled]
+      `INSERT INTO services (name, type, target, port, method, expectedStatus, interval_seconds, timeout_ms, enabled, "group")
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [payload.name, payload.type, payload.target, payload.port, payload.method, payload.expectedStatus, payload.interval_seconds, payload.timeout_ms, payload.enabled, payload.group]
     );
     saveDB();
     return queryOne('SELECT * FROM services WHERE id = ?', [res.lastID]);
   },
+  bulkCreate: async (items) => {
+    const results = [];
+    for (const item of items) {
+      try {
+        const created = await services.create(item);
+        results.push({ success: true, service: created });
+      } catch (e) {
+        results.push({ success: false, error: e.message, data: item });
+      }
+    }
+    return results;
+  },
   update: async (id, data) => {
     const keys = Object.keys(data);
     if (keys.length === 0) return queryOne('SELECT * FROM services WHERE id = ?', [id]);
-    const sets = keys.map(k => `${k} = ?`).join(', ');
+    const sets = keys.map(k => k === 'group' ? `"group" = ?` : `${k} = ?`).join(', ');
     const values = keys.map(k => data[k]);
     run(`UPDATE services SET ${sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [...values, id]);
     saveDB();

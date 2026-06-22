@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { useApp } from '../App.jsx'
 import moment from 'moment'
 import Modal from '../components/Modal.jsx'
@@ -8,12 +8,15 @@ import {
   Button, IconButton
 } from '../components/Form.jsx'
 import useApi from '../hooks/useApi'
+import { ImportModal, ExportModal } from '../components/ImportExport.jsx'
 
 function ToastProvider() {
   return null
 }
 
-function ServiceForm({ initial, services, onSubmit, onCancel }) {
+const PRESET_GROUPS = ['基础设施', '业务服务', '外部依赖', '数据存储', '其他']
+
+function ServiceForm({ initial, services, groups, onSubmit, onCancel }) {
   const [form, setForm] = useState({
     name: initial?.name || '',
     type: initial?.type || 'http',
@@ -23,9 +26,15 @@ function ServiceForm({ initial, services, onSubmit, onCancel }) {
     expectedStatus: initial?.expectedStatus || 200,
     interval_seconds: initial?.interval_seconds || 30,
     timeout_ms: initial?.timeout_ms || 5000,
-    enabled: initial?.enabled !== undefined ? initial.enabled : 1
+    enabled: initial?.enabled !== undefined ? initial.enabled : 1,
+    group: initial?.group || ''
   })
   const [errors, setErrors] = useState({})
+
+  const allGroups = useMemo(() => {
+    const set = new Set([...PRESET_GROUPS, ...(groups || [])])
+    return Array.from(set)
+  }, [groups])
 
   const set = (k, v) => {
     setForm(f => ({ ...f, [k]: v }))
@@ -55,6 +64,7 @@ function ServiceForm({ initial, services, onSubmit, onCancel }) {
     if (data.expectedStatus) data.expectedStatus = parseInt(data.expectedStatus, 10) || 200
     if (data.port) data.port = parseInt(data.port, 10)
     data.enabled = data.enabled ? 1 : 0
+    data.group = data.group || ''
     await onSubmit(data)
   }
 
@@ -136,6 +146,17 @@ function ServiceForm({ initial, services, onSubmit, onCancel }) {
           <TextInput type="number" value={form.timeout_ms} onChange={v => set('timeout_ms', v)} min="100" />
         </FormField>
       </div>
+
+      <FormField label="分组" help="用于分类管理和批量导出筛选">
+        <SelectInput
+          value={form.group}
+          onChange={v => set('group', v)}
+          options={[
+            { value: '', label: '未分组' },
+            ...allGroups.map(g => ({ value: g, label: g }))
+          ]}
+        />
+      </FormField>
 
       <div style={{ padding: '12px 0' }}>
         <CheckboxInput
@@ -291,8 +312,24 @@ export default function AdminPage() {
   const [showServiceForm, setShowServiceForm] = useState(null)
   const [showMaintForm, setShowMaintForm] = useState(null)
   const [openMaintenanceMenu, setOpenMaintenanceMenu] = useState(null)
+  const [showImportModal, setShowImportModal] = useState(false)
+  const [showExportModal, setShowExportModal] = useState(false)
+  const [groups, setGroups] = useState([])
   const { get, post, put, del } = useApi('/api')
   const { toast, show: showToast } = useToast()
+
+  const fetchGroups = async () => {
+    try {
+      const data = await get('/services/groups')
+      setGroups(data || [])
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    fetchGroups()
+  }, [services.length])
 
   const handleCreateService = async (data) => {
     try {
@@ -422,16 +459,28 @@ export default function AdminPage() {
             管理监控服务端点和维护窗口配置
           </p>
         </div>
-        <Button
-          variant="primary"
-          icon="+"
-          onClick={() => tab === 'services'
-            ? setShowServiceForm({ mode: 'create' })
-            : setShowMaintForm({ mode: 'create' })
-          }
-        >
-          {tab === 'services' ? '添加监控服务' : '创建维护窗口'}
-        </Button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {tab === 'services' && (
+            <>
+              <Button onClick={() => setShowImportModal(true)}>
+                📥 批量导入
+              </Button>
+              <Button onClick={() => setShowExportModal(true)}>
+                📤 导出配置
+              </Button>
+            </>
+          )}
+          <Button
+            variant="primary"
+            icon="+"
+            onClick={() => tab === 'services'
+              ? setShowServiceForm({ mode: 'create' })
+              : setShowMaintForm({ mode: 'create' })
+            }
+          >
+            {tab === 'services' ? '添加监控服务' : '创建维护窗口'}
+          </Button>
+        </div>
       </div>
 
       {activeMaintenance.length > 0 && (
@@ -512,8 +561,14 @@ export default function AdminPage() {
                   </div>
 
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4, flexWrap: 'wrap' }}>
                       <h3 style={{ fontSize: 16, fontWeight: 600 }}>{svc.name}</h3>
+                      {svc.group && (
+                        <span style={{
+                          padding: '2px 8px', fontSize: 11, borderRadius: 4,
+                          background: '#ede9fe', color: '#6d28d9', fontWeight: 500
+                        }}>{svc.group}</span>
+                      )}
                       {!svc.enabled && (
                         <span style={{
                           padding: '2px 8px', fontSize: 11, borderRadius: 4,
@@ -724,6 +779,7 @@ export default function AdminPage() {
           <ServiceForm
             initial={showServiceForm.data}
             services={services}
+            groups={groups}
             onSubmit={showServiceForm.mode === 'create'
               ? handleCreateService
               : (data) => handleUpdateService(showServiceForm.data.id, data)
@@ -749,6 +805,23 @@ export default function AdminPage() {
             onCancel={() => setShowMaintForm(null)}
           />
         </Modal>
+      )}
+
+      {showImportModal && (
+        <ImportModal
+          onClose={() => setShowImportModal(false)}
+          onComplete={async () => {
+            await fetchServices()
+            await fetchGroups()
+          }}
+        />
+      )}
+
+      {showExportModal && (
+        <ExportModal
+          groups={groups}
+          onClose={() => setShowExportModal(false)}
+        />
       )}
     </div>
   )
