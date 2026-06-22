@@ -8,7 +8,8 @@ import {
   Button, IconButton
 } from '../components/Form.jsx'
 import useApi from '../hooks/useApi'
-import { ImportModal, ExportModal } from '../components/ImportExport.jsx'
+import ImportModal from '../components/ImportExport/ImportModal.jsx'
+import ExportModal from '../components/ImportExport/ExportModal.jsx'
 
 function ToastProvider() {
   return null
@@ -820,6 +821,7 @@ export default function AdminPage() {
       {showExportModal && (
         <ExportModal
           groups={groups}
+          services={services}
           onClose={() => setShowExportModal(false)}
         />
       )}
